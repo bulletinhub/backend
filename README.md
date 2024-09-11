@@ -5,6 +5,8 @@ A laravel back end project to get news from different APIs and sources, with JWT
 ## Requirements
 
 - **composer**
+- **NewsData API token**
+- **Currents API token**
 
 ## Installation
 
