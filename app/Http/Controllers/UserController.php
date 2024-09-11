@@ -10,8 +10,6 @@ use App\Models\User;
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\AuthController;
 
-use Illuminate\Support\Facades\Log;
-
 class UserController extends Controller
 {
     /**
