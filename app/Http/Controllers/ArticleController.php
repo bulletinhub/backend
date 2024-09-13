@@ -4,15 +4,23 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use GuzzleHttp\Client as GuzzleClient;
+use DateTime;
 
 use App\Models\Article;
 use Illuminate\Support\Facades\Log;
 
 use App\Http\Controllers\ArticleCategoriesController;
-
+use Exception;
 
 class ArticleController extends Controller
 {
+    protected $categoriesController;
+
+    public function __construct()
+    {
+        $this->categoriesController = new ArticleCategoriesController();
+    }
+
     /**
      * Store a newly created resource in storage.
      */
@@ -43,43 +51,16 @@ class ArticleController extends Controller
     public function index()
     {
         try {
-            $categoriesController = new ArticleCategoriesController();
-
             date_default_timezone_set('America/Sao_Paulo');
             $today = date('Y-m-d');
             $articles = Article::where('published', $today)->get()->all();
 
             // enhance this in the future by sending to a queue
             if (empty($articles)) {
-                $data = $this->getLatestArticlesFromApis();
-
-                foreach ($data as $article) {
-                    $createdArticle = $this->store($article);
-                    $categoriesController->store($article['categories'], $createdArticle['id']);
-                    $articleCategories = $categoriesController->getCategoriesByArticleId($createdArticle['id']);
-
-                    $articles[] = [
-                        'title' => $createdArticle->title,
-                        'description' => $createdArticle->description,
-                        'url_origin' => $createdArticle->url_origin,
-                        'author' => $createdArticle->author,
-                        'url_thumbnail' => $createdArticle->url_thumbnail,
-                        'language' => $createdArticle->language,
-                        'source' => $createdArticle->source,
-                        'published' => $createdArticle->published,
-                        "categories" => $articleCategories
-                    ];
-                }
+                $articles = $this->getArticlesFromExternalApis();
             }
             
-            // setting categories when articles from local db
-            foreach ($articles as $key => $value) {
-                if (!isset($article["categories"])) {
-                    $articleCategories = $categoriesController->getCategoriesByArticleId($articles[$key]['id']);
-
-                    $articles[$key]["categories"] = $articleCategories;
-                }
-            }
+            $articles = $this->setArticleCategories($articles);
             
             return response()->json([
                 'status' => 'success',
@@ -95,17 +76,48 @@ class ArticleController extends Controller
         }
     }
 
+    public function getArticlesFromExternalApis($date = null)
+    {
+        $articles = [];
+
+        if ($date) {
+            $articles = $this->getArticlesFromCurrents($date);
+        } else {
+            $articles = $this->getLatestArticlesFromApis();
+        }
+
+        if (empty($articles)) throw new Exception("Couldn't retrieve older articles either from the backend or from any external API.");
+
+        foreach ($articles as $key => $value) {
+            $createdArticle = $this->store($articles[$key]);
+            $this->categoriesController->store($articles[$key]['categories'], $createdArticle['id']);
+            $articles[$key]['id'] = $createdArticle['id'];
+        }
+
+        return $articles;
+    }
+
+    public function setArticleCategories($articles)
+    {
+        foreach ($articles as $key => $value) {
+            if (!isset($article["categories"])) {
+                $articleCategories = $this->categoriesController->getCategoriesByArticleId($articles[$key]['id']);
+
+                $articles[$key]["categories"] = $articleCategories;
+            }
+        }
+        return $articles;
+    }
+
     /**
      * Display the specified resource.
      */
     public function show(string $id)
     {
         try {
-            $categoriesController = new ArticleCategoriesController();
-
             $article = Article::findOrFail($id);
 
-            $articleCategories = $categoriesController->getCategoriesByArticleId($id);
+            $articleCategories = $this->categoriesController->getCategoriesByArticleId($id);
 
             $article["categories"] = $articleCategories;
 
@@ -122,9 +134,9 @@ class ArticleController extends Controller
         }
     }
 
-    public function getLatestArticlesFromApis() {
+    public function getLatestArticlesFromApis()
+    {
         try {
-            // enhance this when all apis became online
             $data = $this->getArticlesFromNewsData();
             if (empty($data)) {
                 $data = $this->getArticlesFromCurrents();
@@ -136,28 +148,49 @@ class ArticleController extends Controller
         }
     }
 
-    public function getArticlesFromCurrents() {
+    public function getArticlesFromCurrents($date = null)
+    {
         $apiToken = $_ENV['CURRENTS_API_TOKEN'];
 
         if (!$apiToken) {
             Log::channel('stderr')->info('Currents API token not found!');
             return [];
         }
+
+        if ($date) {
+            $reqUrl = 'https://api.currentsapi.services/v1/search?language=en&start_date='.$date.'T00:00:00+00:00&end_date='.$date.'T23:59:59+00:00&apiKey='.$apiToken;
+        } else {
+            $reqUrl = 'https://api.currentsapi.services/v1/latest-news?language=en&apiKey='.$apiToken;
+        }
         
         $client = new GuzzleClient();
-        $res = $client->request('GET', 'https://api.currentsapi.services/v1/latest-news?language=us&apiKey='.$apiToken);
+        $res = $client->request('GET', $reqUrl);
         if ($res->getStatusCode() == 200) {
-            $data = $res->getBody();
+            Log::channel('stderr')->info(json_encode($res->getBody()));
+            $data = json_decode($res->getBody(), true);
             $formattedData = [];
-            // formatted data here when api is online
-            return $data;
+            foreach ($data['news'] as $article) {
+                $articleDb = [];
+                $articleDb['title'] = $article['title'];
+                $articleDb['description'] = $article['description'];
+                $articleDb['url_origin'] = $article['url'];
+                $articleDb['author'] = $article['author'];
+                $articleDb['url_thumbnail'] = $article['image'];
+                $articleDb['language'] = $article['language'];
+                $articleDb['source'] = $this->getFinalWordOfURL($article['url']);
+                $articleDb['published'] = (new DateTime($article['published']))->format('Y-m-d');
+                $articleDb['categories'] = $article['category'];
+                $formattedData[] = $articleDb;
+            }
+            return $formattedData;
         } else {
             Log::channel('stderr')->info("Coudn't retrieve articles from Currents API");
             return [];
         }
     }
 
-    public function getArticlesFromNewsData($date = null) {
+    public function getArticlesFromNewsData($date = null) 
+    {
         $apiToken = $_ENV['NEWSDATAIO_API_TOKEN'];
 
         if (!$apiToken) {
@@ -196,20 +229,21 @@ class ArticleController extends Controller
         }
     }
 
-    public function getArticleByDate(string $date) {
+    public function getArticleByDate(string $date)
+    {
         try {
-            $categoriesController = new ArticleCategoriesController();
+            $articles = Article::where('published', $date)->get()->all();
 
-            $data = $this->getArticlesFromNewsData($date);
-
-            foreach ($data as $article) {
-                $createdArticle = $this->store($article);
-                $categoriesController->store($article['categories'], $createdArticle['id']);
+            if (empty($articles)) {
+                $articles = $this->getArticlesFromExternalApis($date);
             }
+
+            $articles = $this->setArticleCategories($articles);
             
             return response()->json([
                 'status' => 'success',
                 'message' => 'Articles from '.$date.' now available',
+                'data' => $articles
             ], 200);
         } catch (\Throwable $th) {
             return response()->json([
@@ -217,5 +251,20 @@ class ArticleController extends Controller
                 'message' => $th->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Extract the final word of a URL. Example: Given "https://www.maps.google.com"
+     * it returns "google"
+     */
+    public function getFinalWordOfURL($url)
+    {
+        $hostname = parse_url($url, PHP_URL_HOST);
+        
+        $parts = explode('.', $hostname);
+        
+        $finalWord = $parts[count($parts) - 2];
+    
+        return $finalWord;
     }
 }
