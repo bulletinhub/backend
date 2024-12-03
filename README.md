@@ -1,6 +1,7 @@
 # Bulletin Hub 
 
 A laravel back end project to get news from different APIs and sources, with JWT auth.
+This project (both frontend and backend) was part of a Skill Assessment test for a job.
 
 ## Requirements
 
